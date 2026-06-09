@@ -3,6 +3,7 @@ package scheduler
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -10,6 +11,7 @@ import (
 type Scheduler struct {
 	mu         sync.Mutex
 	pq         PriorityQueue
+	tasks      map[string]*Task
 	wakeupChan chan struct{}
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -21,6 +23,7 @@ func New() *Scheduler {
 
 	schedule := &Scheduler{
 		pq:         make(PriorityQueue, 0),
+		tasks:      make(map[string]*Task),
 		wakeupChan: make(chan struct{}, 1),
 		ctx:        ctx,
 		cancel:     cancel,
@@ -40,53 +43,51 @@ func (schedule *Scheduler) Stop() {
 	schedule.wg.Wait()
 }
 
-func (schedule *Scheduler) Schedule(id string, executeAt int64, action func()) {
+func (schedule *Scheduler) Schedule(id string, executeAt int64, action func()) error {
 	schedule.mu.Lock()
-	task := &Task{ // Found automatically in task.go
+	defer schedule.mu.Unlock()
+
+	if _, exists := schedule.tasks[id]; exists {
+		return fmt.Errorf("task %q is already scheduled", id)
+	}
+
+	task := &Task{
 		ID:        id,
 		ExecuteAt: executeAt,
 		Action:    action,
 	}
 	heap.Push(&schedule.pq, task)
+	schedule.tasks[id] = task
 
-	isEarliest := schedule.pq.Peek() == task
-	schedule.mu.Unlock()
-
-	if isEarliest {
+	if schedule.pq.Peek() == task {
 		select {
 		case schedule.wakeupChan <- struct{}{}:
 		default:
 		}
 	}
+
+	return nil
 }
 
-// Cancel removes a task from the queue by its ID before it executes.
 func (schedule *Scheduler) Cancel(id string) bool {
 	schedule.mu.Lock()
 	defer schedule.mu.Unlock()
 
-	// Find the task index by matching the ID
-	targetIdx := -1
-	for i, task := range schedule.pq {
-		if task.ID == id {
-			targetIdx = i
-			break
-		}
+	task, ok := schedule.tasks[id]
+	if !ok || task == nil {
+		return false
 	}
 
-	// If found, remove it from the heap safely
-	if targetIdx != -1 {
-		heap.Remove(&schedule.pq, targetIdx)
-		return true
+	if task.index >= 0 {
+		heap.Remove(&schedule.pq, task.index)
 	}
-
-	return false // Task wasn't found (already executed or wrong ID)
+	delete(schedule.tasks, id)
+	return true
 }
 
 func (schedule *Scheduler) run() {
 	defer schedule.wg.Done()
-	var timer *time.Timer
-	timer = time.NewTimer(1 * time.Hour)
+	timer := time.NewTimer(1 * time.Hour)
 	if !timer.Stop() {
 		<-timer.C
 	}
@@ -102,6 +103,8 @@ func (schedule *Scheduler) run() {
 		if hasTask {
 			if nextTask.ExecuteAt <= now {
 				task := heap.Pop(&schedule.pq).(*Task)
+				// FIX 2: single delete here; Cancel() handles its own path
+				delete(schedule.tasks, task.ID)
 				schedule.mu.Unlock()
 				go task.Action()
 				continue

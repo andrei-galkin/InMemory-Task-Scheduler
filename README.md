@@ -24,4 +24,5 @@ go run .
 ## Notes
 
 - The scheduler uses second-level timestamps via `time.Unix`.
+- `Cancel` looks up pending tasks by ID in $O(1)$ time and then removes them from the heap in $O(\log n)$ using the task's stored heap index.
 - `Stop()` cancels the scheduler loop; active task goroutines are launched asynchronously.
